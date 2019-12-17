@@ -77,7 +77,8 @@ class ResourceAccessState : public SyncStageAccess {
     HazardResult DetectHazard(SyncStageAccessIndex usage_index) const;
     void Update(SyncStageAccessIndex usage_index, const ResourceUsageTag &tag);
     void ApplyExecutionBarrier(VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask);
-    void ApplyMemoryBarrier(SyncStageAccessFlags src_scope, SyncStageAccessFlags dst_scope);
+    void ApplyMemoryAccessBarrier(VkPipelineStageFlags src_stage_mask, SyncStageAccessFlags src_scope,
+                                  VkPipelineStageFlags dst_stage_mask, SyncStageAccessFlags dst_scope);
 
   private:
     bool IsWriteHazard(SyncStageAccessFlagBits usage) const { return 0 != (usage & ~write_barriers); }
@@ -90,39 +91,38 @@ class ResourceAccessState : public SyncStageAccess {
     SyncStageAccessFlagBits last_write;  // only the most recent write
     ResourceUsageTag write_tag;
     SyncStageAccessFlags write_barriers;  // union of applicable barrier masks since last write
+    VkPipelineStageFlags write_dependency_chain;  // intiially zero, but accumulating the dstStages of barriers if they chain.
 
     std::array<ReadState, 8 * sizeof(VkPipelineStageFlags)> last_reads;
     uint32_t last_read_count;
     VkPipelineStageFlags last_read_stages;
 };
 
-// This is a place holder as we test the barrier update logic, we're only going to be tracking whole buffers at this point
-// For the first pass we're only tracking ResourceAccess and barriers within a single command buffer, at record time.e
-class ResourceAccessTracker : public SyncStageAccess {
-  public:
-    using Map = std::map<VkBuffer, ResourceAccessState>;
+using MemoryAccessRangeMap = sparse_container::range_map<VkDeviceSize, ResourceAccessState>;
+using MemoryAccessRange = typename MemoryAccessRangeMap::key_type;
 
-  private:
-    ResourceAccessState default_state;
+class MemoryAccessTracker : public SyncStageAccess {
+  public:
+    using Map = std::map<VkDeviceMemory, MemoryAccessRangeMap>;
 
   public:
     // TODO -- hide the details of the implementation..
     Map map;
-    ResourceAccessState *GetImpl(VkBuffer buffer, bool do_insert) {
-        auto find_it = map.find(buffer);
+    MemoryAccessRangeMap *GetImpl(VkDeviceMemory memory, bool do_insert) {
+        auto find_it = map.find(memory);
         if (find_it == map.end()) {
             if (!do_insert) return nullptr;
-            auto insert_pair = map.insert(std::make_pair(buffer, default_state));
+            auto insert_pair = map.insert(std::make_pair(memory, MemoryAccessRangeMap()));
             find_it = insert_pair.first;
         }
         return &find_it->second;
     }
-    ResourceAccessState *Get(VkBuffer buffer) { return GetImpl(buffer, true); }
+    MemoryAccessRangeMap *Get(VkDeviceMemory memory) { return GetImpl(memory, true); }
 
-    ResourceAccessState *GetNoInsert(VkBuffer buffer) { return GetImpl(buffer, false); }
+    MemoryAccessRangeMap *GetNoInsert(VkDeviceMemory memory) { return GetImpl(memory, false); }
 
-    const ResourceAccessState *Get(VkBuffer buffer) const {
-        auto find_it = map.find(buffer);
+    const MemoryAccessRangeMap *Get(VkDeviceMemory memory) const {
+        auto find_it = map.find(memory);
         if (find_it == map.cend()) {
             return nullptr;
         }
@@ -130,7 +130,7 @@ class ResourceAccessTracker : public SyncStageAccess {
     }
 
     void Reset() { map.clear(); }
-    ResourceAccessTracker() : default_state(), map() {}
+    MemoryAccessTracker() : map() {}
 };
 
 class SyncValidator : public ValidationStateTracker, public SyncStageAccess {
@@ -139,25 +139,25 @@ class SyncValidator : public ValidationStateTracker, public SyncStageAccess {
 
     using StateTracker::AccessorTraitsTypes;
     ResourceUsageTag tag = 0;  // Find a better tagging scheme...
-    std::map<VkCommandBuffer, std::unique_ptr<ResourceAccessTracker>> cb_access_state;
-    ResourceAccessTracker *GetAccessTrackerImpl(VkCommandBuffer command_buffer, bool do_insert) {
+    std::map<VkCommandBuffer, std::unique_ptr<MemoryAccessTracker>> cb_access_state;
+    MemoryAccessTracker *GetAccessTrackerImpl(VkCommandBuffer command_buffer, bool do_insert) {
         auto found_it = cb_access_state.find(command_buffer);
         if (found_it == cb_access_state.end()) {
             if (!do_insert) return nullptr;
             // If we don't have one, make it.
-            std::unique_ptr<ResourceAccessTracker> tracker(new ResourceAccessTracker);
+            std::unique_ptr<MemoryAccessTracker> tracker(new MemoryAccessTracker);
             auto insert_pair = cb_access_state.insert(std::make_pair(command_buffer, std::move(tracker)));
             found_it = insert_pair.first;
         }
         return found_it->second.get();
     }
-    ResourceAccessTracker *GetAccessTracker(VkCommandBuffer command_buffer) {
+    MemoryAccessTracker *GetAccessTracker(VkCommandBuffer command_buffer) {
         return GetAccessTrackerImpl(command_buffer, true);  // true -> do_insert on not found
     }
-    ResourceAccessTracker *GetAccessTrackerNoInsert(VkCommandBuffer command_buffer) {
+    MemoryAccessTracker *GetAccessTrackerNoInsert(VkCommandBuffer command_buffer) {
         return GetAccessTrackerImpl(command_buffer, false);  // false -> don't do_insert on not found
     }
-    const ResourceAccessTracker *GetAccessTracker(VkCommandBuffer command_buffer) const {
+    const MemoryAccessTracker *GetAccessTracker(VkCommandBuffer command_buffer) const {
         const auto found_it = cb_access_state.find(command_buffer);
         if (found_it == cb_access_state.end()) {
             return nullptr;
@@ -165,19 +165,19 @@ class SyncValidator : public ValidationStateTracker, public SyncStageAccess {
         return found_it->second.get();
     }
 
-    void ApplyGlobalBarriers(ResourceAccessTracker *tracker, VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask,
+    void ApplyGlobalBarriers(MemoryAccessTracker *tracker, VkPipelineStageFlags srcStageMask, VkPipelineStageFlags dstStageMask,
                              SyncStageAccessFlags src_stage_scope, SyncStageAccessFlags dst_stage_scope,
                              uint32_t memoryBarrierCount, const VkMemoryBarrier *pMemoryBarriers);
-    void ApplyBufferBarriers(ResourceAccessTracker *tracker, SyncStageAccessFlags src_stage_scope,
+    void ApplyBufferBarriers(MemoryAccessTracker *tracker, VkPipelineStageFlags src_stage_mask,
+                             SyncStageAccessFlags src_stage_scope, VkPipelineStageFlags dst_stage_mask,
                              SyncStageAccessFlags dst_stage_scope, uint32_t barrier_count, const VkBufferMemoryBarrier *barriers);
-    void ApplyImageBarriers(ResourceAccessTracker *tracker, SyncStageAccessFlags src_stage_scope,
+    void ApplyImageBarriers(MemoryAccessTracker *tracker, SyncStageAccessFlags src_stage_scope,
                             SyncStageAccessFlags dst_stage_scope, uint32_t imageMemoryBarrierCount,
                             const VkImageMemoryBarrier *pImageMemoryBarriers);
 
-    void UpdateAccessState(ResourceAccessTracker *tracker, SyncStageAccessIndex current_usage, VkBuffer buffer,
-                           const VkBufferCopy &region);
-    HazardResult DetectHazard(const ResourceAccessTracker *tracker, SyncStageAccessIndex current_usage, VkBuffer buffer,
-                              const VkBufferCopy &region) const;
+    void UpdateAccessState(MemoryAccessRangeMap *accesses, SyncStageAccessIndex current_usage, const MemoryAccessRange &range);
+    HazardResult DetectHazard(const MemoryAccessRangeMap &accesses, SyncStageAccessIndex current_usage,
+                              const MemoryAccessRange &range) const;
 
     void ResetCommandBuffer(VkCommandBuffer command_buffer);
 
