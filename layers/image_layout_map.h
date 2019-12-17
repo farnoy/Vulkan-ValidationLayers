@@ -212,5 +212,86 @@ class ImageSubresourceLayoutMap {
 
     static const ConstIterator end_iterator;  // Just to hold the end condition tombstone (aspectMask == 0)
 };
+
+static inline bool operator==(const VkImageSubresource& lhs, const VkImageSubresource& rhs) {
+    bool is_equal = (lhs.aspectMask == rhs.aspectMask) && (lhs.mipLevel == rhs.mipLevel) && (lhs.arrayLayer == rhs.arrayLayer);
+    return is_equal;
+}
+
+struct ImageSubresourcePair {
+    VkImage image;
+    bool hasSubresource;
+    VkImageSubresource subresource;
+
+    inline bool operator==(const ImageSubresourcePair& img) {
+        if (image != img.image || hasSubresource != img.hasSubresource) return false;
+        return !hasSubresource || (subresource == img.subresource);
+    }
+};
+
+struct IMAGE_LAYOUT_STATE {
+    VkImageLayout layout;
+    VkFormat format;
+};
+
+class ImageSubresPairLayoutMap {
+  public:
+    ImageSubresPairLayoutMap() : encoder_(), layouts_() {}
+    ~ImageSubresPairLayoutMap() {}
+
+    using LayoutMap = subresource_adapter::BothRangeMap<IMAGE_LAYOUT_STATE, 16>;
+
+    VkImageLayout FindLayout(const ImageSubresourcePair& subres_pair) const {
+        IndexType index = encoder_.Encode(subres_pair);
+        auto found = layouts_.find(index);
+        VkImageLayout value = kInvalidLayout;
+        if (found != layouts_.end()) {
+            value = found->second.layout;
+        }
+        return value;
+    }
+
+    void SetLayout(const ImageSubresourcePair& subres_pair, VkImageLayout layout) {
+        IndexType index = encoder_.Encode(subres_pair);
+        auto found = layouts_.find(index);
+
+        if (found != layouts_.end()) {
+            // found->second.layout = layout;
+            sparse_container::update_range_value(layouts_, index, IMAGE_LAYOUT_STATE{layout, found->second.format},
+                                                 WritePolicy::prefer_dest);
+        } else {
+            SetLayoutState(subres_pair, IMAGE_LAYOUT_STATE{layout, VK_FORMAT_UNDEFINED});
+        }
+    }
+
+    void SetLayoutState(const ImageSubresourcePair& subres_pair, const IMAGE_LAYOUT_STATE& layout_state) {
+        IndexType index = encoder_.Encode(subres_pair);
+        // layouts_.insert(LayoutMap::value_type(LayoutMap::key_type(), layout_state));
+        sparse_container::update_range_value(layouts_, index, layout_state, WritePolicy::prefer_dest);
+    }
+
+  private:
+    Encoder encoder_;
+    LayoutMap layouts_;
+};
 }  // namespace image_layout_map
+
+using ImageSubresourcePair = image_layout_map::ImageSubresourcePair;
+
+namespace std {
+template <>
+struct hash<ImageSubresourcePair> {
+    size_t operator()(ImageSubresourcePair img) const throw() {
+        size_t hashVal = hash<uint64_t>()(reinterpret_cast<uint64_t&>(img.image));
+        hashVal ^= hash<bool>()(img.hasSubresource);
+        if (img.hasSubresource) {
+            hashVal ^= hash<uint32_t>()(reinterpret_cast<uint32_t&>(img.subresource.aspectMask));
+            hashVal ^= hash<uint32_t>()(img.subresource.mipLevel);
+            hashVal ^= hash<uint32_t>()(img.subresource.arrayLayer);
+        }
+        return hashVal;
+    }
+};
+}  // namespace std
+
 #endif
