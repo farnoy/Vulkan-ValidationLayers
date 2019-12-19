@@ -173,15 +173,15 @@ void CoreChecks::IncrementCommandCount(VkCommandBuffer commandBuffer) {
 }
 
 // For given mem object, verify that it is not null or UNBOUND, if it is, report error. Return skip value.
-bool CoreChecks::VerifyBoundMemoryIsValid(VkDeviceMemory mem, const VulkanTypedHandle &typed_handle, const char *api_name,
-                                          const char *error_code) const {
+bool CoreChecks::VerifyBoundMemoryIsValid(DEVICE_MEMORY_STATE *mem_state, const VulkanTypedHandle &typed_handle,
+                                          const char *api_name, const char *error_code) const {
     bool result = false;
     auto type_name = object_string[typed_handle.type];
-    if (VK_NULL_HANDLE == mem) {
+    if (!mem_state) {
         result = log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT, typed_handle.handle,
                          error_code, "%s: %s used with no memory bound. Memory should be bound by calling vkBind%sMemory().",
                          api_name, report_data->FormatHandle(typed_handle).c_str(), type_name + 2);
-    } else if (MEMORY_UNBOUND == mem) {
+    } else if (mem_state->destroyed) {
         result = log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_IMAGE_EXT, typed_handle.handle,
                          error_code,
                          "%s: %s used with no memory bound and previously bound memory was freed. Memory must not be freed "
@@ -212,8 +212,8 @@ bool CoreChecks::ValidateMemoryIsBoundToImage(const IMAGE_STATE *image_state, co
                     report_data->FormatHandle(image_state->bind_swapchain).c_str());
         }
     } else if (0 == (static_cast<uint32_t>(image_state->createInfo.flags) & VK_IMAGE_CREATE_SPARSE_BINDING_BIT)) {
-        result = VerifyBoundMemoryIsValid(image_state->binding.mem, VulkanTypedHandle(image_state->image, kVulkanObjectTypeImage),
-                                          api_name, error_code);
+        result = VerifyBoundMemoryIsValid(image_state->binding.mem_state.get(),
+                                          VulkanTypedHandle(image_state->image, kVulkanObjectTypeImage), api_name, error_code);
     }
     return result;
 }
@@ -223,7 +223,7 @@ bool CoreChecks::ValidateMemoryIsBoundToBuffer(const BUFFER_STATE *buffer_state,
                                                const char *error_code) const {
     bool result = false;
     if (0 == (static_cast<uint32_t>(buffer_state->createInfo.flags) & VK_BUFFER_CREATE_SPARSE_BINDING_BIT)) {
-        result = VerifyBoundMemoryIsValid(buffer_state->binding.mem,
+        result = VerifyBoundMemoryIsValid(buffer_state->binding.mem_state.get(),
                                           VulkanTypedHandle(buffer_state->buffer, kVulkanObjectTypeBuffer), api_name, error_code);
     }
     return result;
@@ -232,7 +232,7 @@ bool CoreChecks::ValidateMemoryIsBoundToBuffer(const BUFFER_STATE *buffer_state,
 // Check to see if memory was bound to this acceleration structure
 bool CoreChecks::ValidateMemoryIsBoundToAccelerationStructure(const ACCELERATION_STRUCTURE_STATE *as_state, const char *api_name,
                                                               const char *error_code) const {
-    return VerifyBoundMemoryIsValid(as_state->binding.mem,
+    return VerifyBoundMemoryIsValid(as_state->binding.mem_state.get(),
                                     VulkanTypedHandle(as_state->acceleration_structure, kVulkanObjectTypeAccelerationStructureNV),
                                     api_name, error_code);
 }
@@ -281,7 +281,7 @@ bool CoreChecks::ValidateSetMemBinding(VkDeviceMemory mem, const VulkanTypedHand
                                 "In %s, attempting to bind %s to %s which has already been bound to %s.", apiName,
                                 report_data->FormatHandle(mem).c_str(), report_data->FormatHandle(typed_handle).c_str(),
                                 report_data->FormatHandle(prev_binding->mem).c_str());
-            } else if (mem_binding->binding.mem == MEMORY_UNBOUND) {
+            } else if (mem_binding->binding.mem_state && mem_binding->binding.mem_state->destroyed) {
                 skip |= log_msg(report_data, VK_DEBUG_REPORT_ERROR_BIT_EXT, VK_DEBUG_REPORT_OBJECT_TYPE_DEVICE_MEMORY_EXT,
                                 HandleToUint64(mem), kVUID_Core_MemTrack_RebindObject,
                                 "In %s, attempting to bind %s to %s which was previous bound to memory that has "
@@ -7781,7 +7781,7 @@ bool CoreChecks::ValidateDependencies(FRAMEBUFFER_STATE const *framebuffer, REND
                 if (!image_data_i || !image_data_j) {
                     continue;
                 }
-                if (image_data_i->binding.mem == image_data_j->binding.mem &&
+                if (image_data_i->binding.mem_state->mem == image_data_j->binding.mem_state->mem &&
                     IsRangeOverlapping(image_data_i->binding.offset, image_data_i->binding.size, image_data_j->binding.offset,
                                        image_data_j->binding.size)) {
                     attachments[i].overlapping.emplace_back(j);

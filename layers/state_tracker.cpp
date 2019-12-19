@@ -576,8 +576,7 @@ void ValidationStateTracker::AddCommandBufferBindingAccelerationStructure(CMD_BU
 }
 
 // Clear a single object binding from given memory object
-void ValidationStateTracker::ClearMemoryObjectBinding(const VulkanTypedHandle &typed_handle, VkDeviceMemory mem) {
-    DEVICE_MEMORY_STATE *mem_info = GetDevMemState(mem);
+void ValidationStateTracker::ClearMemoryObjectBinding(const VulkanTypedHandle &typed_handle, DEVICE_MEMORY_STATE *mem_info) {
     // This obj is bound to a memory object. Remove the reference to this object in that memory object's list
     if (mem_info) {
         mem_info->obj_bindings.erase(typed_handle);
@@ -591,10 +590,10 @@ void ValidationStateTracker::ClearMemoryObjectBindings(const VulkanTypedHandle &
     BINDABLE *mem_binding = GetObjectMemBinding(typed_handle);
     if (mem_binding) {
         if (!mem_binding->sparse) {
-            ClearMemoryObjectBinding(typed_handle, mem_binding->binding.mem);
+            ClearMemoryObjectBinding(typed_handle, mem_binding->binding.mem_state.get());
         } else {  // Sparse, clear all bindings
             for (auto &sparse_mem_binding : mem_binding->sparse_bindings) {
-                ClearMemoryObjectBinding(typed_handle, sparse_mem_binding.mem);
+                ClearMemoryObjectBinding(typed_handle, sparse_mem_binding.mem_state.get());
             }
         }
     }
@@ -605,13 +604,12 @@ void ValidationStateTracker::ClearMemoryObjectBindings(const VulkanTypedHandle &
 void ValidationStateTracker::SetMemBinding(VkDeviceMemory mem, BINDABLE *mem_binding, VkDeviceSize memory_offset,
                                            const VulkanTypedHandle &typed_handle) {
     assert(mem_binding);
-    mem_binding->binding.mem = mem;
-    mem_binding->binding.offset = memory_offset;
-    mem_binding->binding.size = mem_binding->requirements.size;
 
     if (mem != VK_NULL_HANDLE) {
         mem_binding->binding.mem_state = GetShared<DEVICE_MEMORY_STATE>(mem);
         if (mem_binding->binding.mem_state) {
+            mem_binding->binding.offset = memory_offset;
+            mem_binding->binding.size = mem_binding->requirements.size;
             mem_binding->binding.mem_state->obj_bindings.insert(typed_handle);
             // For image objects, make sure default memory state is correctly set
             // TODO : What's the best/correct way to handle this?
@@ -638,7 +636,7 @@ void ValidationStateTracker::SetMemBinding(VkDeviceMemory mem, BINDABLE *mem_bin
 bool ValidationStateTracker::SetSparseMemBinding(MEM_BINDING binding, const VulkanTypedHandle &typed_handle) {
     bool skip = VK_FALSE;
     // Handle NULL case separately, just clear previous binding & decrement reference
-    if (binding.mem == VK_NULL_HANDLE) {
+    if (!binding.mem_state) {
         // TODO : This should cause the range of the resource to be unbound according to spec
     } else {
         BINDABLE *mem_binding = GetObjectMemBinding(typed_handle);
@@ -1697,7 +1695,6 @@ void ValidationStateTracker::PreCallRecordFreeMemory(VkDevice device, VkDeviceMe
         }
 
         if (bindable_state) {
-            bindable_state->binding.mem = MEMORY_UNBOUND;
             bindable_state->UpdateBoundMemorySet();
         }
     }
@@ -1735,17 +1732,17 @@ void ValidationStateTracker::PostCallRecordQueueBindSparse(VkQueue queue, uint32
         for (uint32_t j = 0; j < bindInfo.bufferBindCount; j++) {
             for (uint32_t k = 0; k < bindInfo.pBufferBinds[j].bindCount; k++) {
                 auto sparse_binding = bindInfo.pBufferBinds[j].pBinds[k];
-                SetSparseMemBinding({sparse_binding.memory, GetShared<DEVICE_MEMORY_STATE>(sparse_binding.memory),
-                                     sparse_binding.memoryOffset, sparse_binding.size},
-                                    VulkanTypedHandle(bindInfo.pBufferBinds[j].buffer, kVulkanObjectTypeBuffer));
+                SetSparseMemBinding(
+                    {GetShared<DEVICE_MEMORY_STATE>(sparse_binding.memory), sparse_binding.memoryOffset, sparse_binding.size},
+                    VulkanTypedHandle(bindInfo.pBufferBinds[j].buffer, kVulkanObjectTypeBuffer));
             }
         }
         for (uint32_t j = 0; j < bindInfo.imageOpaqueBindCount; j++) {
             for (uint32_t k = 0; k < bindInfo.pImageOpaqueBinds[j].bindCount; k++) {
                 auto sparse_binding = bindInfo.pImageOpaqueBinds[j].pBinds[k];
-                SetSparseMemBinding({sparse_binding.memory, GetShared<DEVICE_MEMORY_STATE>(sparse_binding.memory),
-                                     sparse_binding.memoryOffset, sparse_binding.size},
-                                    VulkanTypedHandle(bindInfo.pImageOpaqueBinds[j].image, kVulkanObjectTypeImage));
+                SetSparseMemBinding(
+                    {GetShared<DEVICE_MEMORY_STATE>(sparse_binding.memory), sparse_binding.memoryOffset, sparse_binding.size},
+                    VulkanTypedHandle(bindInfo.pImageOpaqueBinds[j].image, kVulkanObjectTypeImage));
             }
         }
         for (uint32_t j = 0; j < bindInfo.imageBindCount; j++) {
@@ -1753,8 +1750,7 @@ void ValidationStateTracker::PostCallRecordQueueBindSparse(VkQueue queue, uint32
                 auto sparse_binding = bindInfo.pImageBinds[j].pBinds[k];
                 // TODO: This size is broken for non-opaque bindings, need to update to comprehend full sparse binding data
                 VkDeviceSize size = sparse_binding.extent.depth * sparse_binding.extent.height * sparse_binding.extent.width * 4;
-                SetSparseMemBinding({sparse_binding.memory, GetShared<DEVICE_MEMORY_STATE>(sparse_binding.memory),
-                                     sparse_binding.memoryOffset, size},
+                SetSparseMemBinding({GetShared<DEVICE_MEMORY_STATE>(sparse_binding.memory), sparse_binding.memoryOffset, size},
                                     VulkanTypedHandle(bindInfo.pImageBinds[j].image, kVulkanObjectTypeImage));
             }
         }
