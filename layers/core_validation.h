@@ -29,15 +29,15 @@
 #include "gpu_validation.h"
 #include "shader_validation.h"
 
+using ImageSubresPairLayoutMap = image_layout_map::ImageSubresPairLayoutMap;
+
 class CoreChecks : public ValidationStateTracker {
   public:
     using StateTracker = ValidationStateTracker;
     std::unordered_set<uint64_t> ahb_ext_formats_set;
     GlobalQFOTransferBarrierMap<VkImageMemoryBarrier> qfo_release_image_barrier_map;
     GlobalQFOTransferBarrierMap<VkBufferMemoryBarrier> qfo_release_buffer_barrier_map;
-    unordered_map<VkImage, std::vector<ImageSubresourcePair>> imageSubresourceMap;
-    using ImageSubresPairLayoutMap = std::unordered_map<ImageSubresourcePair, IMAGE_LAYOUT_STATE>;
-    ImageSubresPairLayoutMap imageLayoutMap;
+    unordered_map<VkImage, std::shared_ptr<IMAGE_STATE>> imageLayoutMap;
 
     void IncrementCommandCount(VkCommandBuffer commandBuffer);
 
@@ -468,6 +468,9 @@ class CoreChecks : public ValidationStateTracker {
 
     bool FindLayouts(VkImage image, std::vector<VkImageLayout>& layouts) const;
 
+    bool FindLayout(const unordered_map<VkImage, std::shared_ptr<IMAGE_STATE>>& imageLayoutMap, ImageSubresourcePair imgpair,
+                    VkImageLayout& layout) const;
+
     bool FindLayout(const ImageSubresPairLayoutMap& imageLayoutMap, ImageSubresourcePair imgpair, VkImageLayout& layout) const;
 
     static bool FindLayout(const ImageSubresPairLayoutMap& imageLayoutMap, ImageSubresourcePair imgpair, VkImageLayout& layout,
@@ -537,7 +540,8 @@ class CoreChecks : public ValidationStateTracker {
                                    VkImageLayout dstImageLayout, uint32_t regionCount, const VkImageBlit* pRegions,
                                    VkFilter filter);
 
-    bool ValidateCmdBufImageLayouts(const CMD_BUFFER_STATE* pCB, const ImageSubresPairLayoutMap& globalImageLayoutMap,
+    bool ValidateCmdBufImageLayouts(const CMD_BUFFER_STATE* pCB,
+                                    const unordered_map<VkImage, std::shared_ptr<IMAGE_STATE>>& globalImageLayoutMap,
                                     ImageSubresPairLayoutMap* overlayLayoutMap_arg) const;
 
     void UpdateCmdBufImageLayouts(CMD_BUFFER_STATE* pCB);

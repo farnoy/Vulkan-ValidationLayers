@@ -212,5 +212,92 @@ class ImageSubresourceLayoutMap {
 
     static const ConstIterator end_iterator;  // Just to hold the end condition tombstone (aspectMask == 0)
 };
+
+static inline bool operator==(const VkImageSubresource& lhs, const VkImageSubresource& rhs) {
+    bool is_equal = (lhs.aspectMask == rhs.aspectMask) && (lhs.mipLevel == rhs.mipLevel) && (lhs.arrayLayer == rhs.arrayLayer);
+    return is_equal;
+}
+
+struct ImageSubresourcePair {
+    VkImage image;
+    bool hasSubresource;
+    VkImageSubresource subresource;
+
+    inline bool operator==(const ImageSubresourcePair& img) {
+        if (image != img.image || hasSubresource != img.hasSubresource) return false;
+        return !hasSubresource || (subresource == img.subresource);
+    }
+};
+
+struct IMAGE_LAYOUT_STATE {
+    VkImageLayout layout;
+    VkFormat format;
+};
+
+class ImageSubresPairLayoutMap {
+  public:
+    ImageSubresPairLayoutMap()
+        : encoder_(), layout_states_(encoder_.SubresourceCount()), layout_states_view_(layout_states_, encoder_) {}
+    ~ImageSubresPairLayoutMap() {}
+
+    using RangeMap = subresource_adapter::BothRangeMap<IMAGE_LAYOUT_STATE, 16>;
+    using MapView = subresource_adapter::ConstMapView<RangeMap>;
+
+    VkImageLayout FindLayout(const VkImageSubresource& subres) const {
+        IndexType index = encoder_.Encode(subres);
+        auto found = layout_states_.find(index);
+        VkImageLayout value = kInvalidLayout;
+        if (found != layout_states_.end()) {
+            value = found->second.layout;
+        }
+        return value;
+    }
+
+    void SetLayout(const VkImageSubresource& subres, VkImageLayout layout) {
+        IndexType index = encoder_.Encode(subres);
+        auto found = layout_states_.find(index);
+
+        if (found != layout_states_.end()) {
+            RangeGenerator range_gen(encoder_);
+            sparse_container::update_range_value(layout_states_, range_gen, IMAGE_LAYOUT_STATE{layout, found->second.format},
+                                                 WritePolicy::prefer_dest);
+        } else {
+            SetLayoutState(subres, IMAGE_LAYOUT_STATE{layout, VK_FORMAT_UNDEFINED});
+        }
+    }
+
+    void SetLayoutState(const VkImageSubresource& subres, const IMAGE_LAYOUT_STATE& layout_state) {
+        IndexType index = encoder_.Encode(subres);
+        RangeGenerator range_gen(encoder_);
+        sparse_container::update_range_value(layout_states_, range_gen, layout_state, WritePolicy::prefer_dest);
+    }
+
+    size_t Size() { return layout_states_.size(); }
+    const MapView& LayoutStateView() const { return layout_states_view_; }
+
+  private:
+    Encoder encoder_;
+    RangeMap layout_states_;
+    MapView layout_states_view_;
+};
 }  // namespace image_layout_map
+
+using ImageSubresourcePair = image_layout_map::ImageSubresourcePair;
+
+namespace std {
+template <>
+struct hash<ImageSubresourcePair> {
+    size_t operator()(ImageSubresourcePair img) const throw() {
+        size_t hashVal = hash<uint64_t>()(reinterpret_cast<uint64_t&>(img.image));
+        hashVal ^= hash<bool>()(img.hasSubresource);
+        if (img.hasSubresource) {
+            hashVal ^= hash<uint32_t>()(reinterpret_cast<uint32_t&>(img.subresource.aspectMask));
+            hashVal ^= hash<uint32_t>()(img.subresource.mipLevel);
+            hashVal ^= hash<uint32_t>()(img.subresource.arrayLayer);
+        }
+        return hashVal;
+    }
+};
+}  // namespace std
+
 #endif

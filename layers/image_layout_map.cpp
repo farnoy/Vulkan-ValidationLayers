@@ -376,5 +376,4 @@ ImageSubresourceLayoutMap::ConstIterator::ConstIterator(const RangeMap& current,
       constant_value_bound_() {
     UpdateRangeAndValue();
 }
-
 }  // namespace image_layout_map

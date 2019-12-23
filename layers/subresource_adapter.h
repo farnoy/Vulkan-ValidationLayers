@@ -75,6 +75,7 @@ struct Subresource : public VkImageSubresource {
 class RangeEncoder {
   public:
     static constexpr uint32_t kMaxSupportedAspect = 3;
+    static const IndexType NoSubresoruce = 0;
 
     // The default constructor for default iterators
     RangeEncoder()

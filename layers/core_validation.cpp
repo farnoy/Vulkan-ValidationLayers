@@ -1768,7 +1768,6 @@ void CoreChecks::PostCallRecordCreateDevice(VkPhysicalDevice gpu, const VkDevice
 
 void CoreChecks::PreCallRecordDestroyDevice(VkDevice device, const VkAllocationCallbacks *pAllocator) {
     if (!device) return;
-    imageSubresourceMap.clear();
     imageLayoutMap.clear();
 
     StateTracker::PreCallRecordDestroyDevice(device, pAllocator);
@@ -10173,16 +10172,7 @@ void CoreChecks::PreCallRecordDestroySwapchainKHR(VkDevice device, VkSwapchainKH
         auto swapchain_data = GetSwapchainState(swapchain);
         if (swapchain_data) {
             for (const auto &swapchain_image : swapchain_data->images) {
-                auto image_sub = imageSubresourceMap.find(swapchain_image.image);
-                if (image_sub != imageSubresourceMap.end()) {
-                    for (auto imgsubpair : image_sub->second) {
-                        auto image_item = imageLayoutMap.find(imgsubpair);
-                        if (image_item != imageLayoutMap.end()) {
-                            imageLayoutMap.erase(image_item);
-                        }
-                    }
-                    imageSubresourceMap.erase(image_sub);
-                }
+                imageLayoutMap.erase(swapchain_image.image);
                 EraseQFOImageRelaseBarriers(swapchain_image.image);
             }
         }
@@ -10221,7 +10211,7 @@ void CoreChecks::PostCallRecordGetSwapchainImagesKHR(VkDevice device, VkSwapchai
         // Initialze image layout tracking data
         auto swapchain_state = GetSwapchainState(swapchain);
         const auto image_vector_size = swapchain_state->images.size();
-        IMAGE_LAYOUT_STATE image_layout_node;
+        image_layout_map::IMAGE_LAYOUT_STATE image_layout_node;
         image_layout_node.layout = VK_IMAGE_LAYOUT_UNDEFINED;
         image_layout_node.format = swapchain_state->createInfo.imageFormat;
 
@@ -10231,8 +10221,8 @@ void CoreChecks::PostCallRecordGetSwapchainImagesKHR(VkDevice device, VkSwapchai
             if ((i < image_vector_size) && (swapchain_state->images[i].image != VK_NULL_HANDLE)) continue;
 
             ImageSubresourcePair subpair = {pSwapchainImages[i], false, VkImageSubresource()};
-            imageSubresourceMap[pSwapchainImages[i]].push_back(subpair);
-            imageLayoutMap[subpair] = image_layout_node;
+            auto image_state = Get<IMAGE_STATE>(pSwapchainImages[i]);
+            image_state->layout_state_map.SetLayoutState(subpair.subresource, image_layout_node);
         }
     }
 
