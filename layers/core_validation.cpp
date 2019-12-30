@@ -166,6 +166,14 @@ ImageSubresourceLayoutMap *GetImageSubresourceLayoutMap(CMD_BUFFER_STATE *cb_sta
     return it->second.get();
 }
 
+void AddInitialLayoutintoImageLayoutMap(const IMAGE_STATE &image_state, GlobalImageLayoutMap &image_layout_map) {
+    auto *range_map = GetLayoutRangeMap(&image_layout_map, image_state);
+    auto range_gen = subresource_adapter::RangeGenerator(image_state.range_encoder, image_state.full_range);
+    for (; range_gen->non_empty(); ++range_gen) {
+        range_map->insert(range_map->end(), std::make_pair(*range_gen, image_state.createInfo.initialLayout));
+    }
+}
+
 // Tracks the number of commands recorded in a command buffer.
 void CoreChecks::IncrementCommandCount(VkCommandBuffer commandBuffer) {
     CMD_BUFFER_STATE *cb_state = GetCBState(commandBuffer);
@@ -1760,7 +1768,6 @@ void CoreChecks::PostCallRecordCreateDevice(VkPhysicalDevice gpu, const VkDevice
 
 void CoreChecks::PreCallRecordDestroyDevice(VkDevice device, const VkAllocationCallbacks *pAllocator) {
     if (!device) return;
-    imageSubresourceMap.clear();
     imageLayoutMap.clear();
 
     StateTracker::PreCallRecordDestroyDevice(device, pAllocator);
@@ -2267,13 +2274,12 @@ bool CoreChecks::ValidateMaxTimelineSemaphoreValueDifference(VkQueue queue, VkSe
 }
 
 bool CoreChecks::ValidateCommandBuffersForSubmit(VkQueue queue, const VkSubmitInfo *submit,
-                                                 ImageSubresPairLayoutMap *localImageLayoutMap_arg,
-                                                 QueryMap *local_query_to_state_map,
+                                                 GlobalImageLayoutMap *localImageLayoutMap_arg, QueryMap *local_query_to_state_map,
                                                  vector<VkCommandBuffer> *current_cmds_arg) const {
     bool skip = false;
     auto queue_state = GetQueueState(queue);
 
-    ImageSubresPairLayoutMap &localImageLayoutMap = *localImageLayoutMap_arg;
+    GlobalImageLayoutMap &localImageLayoutMap = *localImageLayoutMap_arg;
     vector<VkCommandBuffer> &current_cmds = *current_cmds_arg;
 
     QFOTransferCBScoreboards<VkImageMemoryBarrier> qfo_image_scoreboards;
@@ -2348,7 +2354,7 @@ bool CoreChecks::PreCallValidateQueueSubmit(VkQueue queue, uint32_t submitCount,
     unordered_set<VkSemaphore> internal_semaphores;
     unordered_map<VkSemaphore, std::set<uint64_t>> timeline_values;
     vector<VkCommandBuffer> current_cmds;
-    ImageSubresPairLayoutMap localImageLayoutMap;
+    GlobalImageLayoutMap localImageLayoutMap;
     QueryMap local_query_to_state_map;
 
     // Now verify each individual submit
@@ -10286,16 +10292,7 @@ void CoreChecks::PreCallRecordDestroySwapchainKHR(VkDevice device, VkSwapchainKH
         auto swapchain_data = GetSwapchainState(swapchain);
         if (swapchain_data) {
             for (const auto &swapchain_image : swapchain_data->images) {
-                auto image_sub = imageSubresourceMap.find(swapchain_image.image);
-                if (image_sub != imageSubresourceMap.end()) {
-                    for (auto imgsubpair : image_sub->second) {
-                        auto image_item = imageLayoutMap.find(imgsubpair);
-                        if (image_item != imageLayoutMap.end()) {
-                            imageLayoutMap.erase(image_item);
-                        }
-                    }
-                    imageSubresourceMap.erase(image_sub);
-                }
+                imageLayoutMap.erase(swapchain_image.image);
                 EraseQFOImageRelaseBarriers(swapchain_image.image);
             }
         }
@@ -10322,11 +10319,6 @@ bool CoreChecks::PreCallValidateGetSwapchainImagesKHR(VkDevice device, VkSwapcha
 
 void CoreChecks::PostCallRecordGetSwapchainImagesKHR(VkDevice device, VkSwapchainKHR swapchain, uint32_t *pSwapchainImageCount,
                                                      VkImage *pSwapchainImages, VkResult result) {
-    // Usually we'd call the StateTracker first, but
-    //     a) none of the new state needed below is from the StateTracker
-    //     b) StateTracker *will* update swapchain_state->images which we use to guard against double initialization
-    // so we'll do it in the opposite order -- CoreChecks then StateTracker.
-    //
     // Note, this will get trickier if we start storing image shared pointers in the image layout data, at which point
     // we'll have to reverse the order *back* and find some other scheme to prevent double initialization.
 
@@ -10334,23 +10326,18 @@ void CoreChecks::PostCallRecordGetSwapchainImagesKHR(VkDevice device, VkSwapchai
         // Initialze image layout tracking data
         auto swapchain_state = GetSwapchainState(swapchain);
         const auto image_vector_size = swapchain_state->images.size();
-        IMAGE_LAYOUT_STATE image_layout_node;
-        image_layout_node.layout = VK_IMAGE_LAYOUT_UNDEFINED;
-        image_layout_node.format = swapchain_state->createInfo.imageFormat;
+
+        StateTracker::PostCallRecordGetSwapchainImagesKHR(device, swapchain, pSwapchainImageCount, pSwapchainImages, result);
 
         for (uint32_t i = 0; i < *pSwapchainImageCount; ++i) {
             // This is check makes sure that we don't have an image initialized for this swapchain index, but
             // given that it's StateTracker that stores this information, need to protect against non-extant entries in the vector
             if ((i < image_vector_size) && (swapchain_state->images[i].image != VK_NULL_HANDLE)) continue;
 
-            ImageSubresourcePair subpair = {pSwapchainImages[i], false, VkImageSubresource()};
-            imageSubresourceMap[pSwapchainImages[i]].push_back(subpair);
-            imageLayoutMap[subpair] = image_layout_node;
+            auto image_state = Get<IMAGE_STATE>(pSwapchainImages[i]);
+            AddInitialLayoutintoImageLayoutMap(*image_state, imageLayoutMap);
         }
     }
-
-    // Now call the base class
-    StateTracker::PostCallRecordGetSwapchainImagesKHR(device, swapchain, pSwapchainImageCount, pSwapchainImages, result);
 }
 
 bool CoreChecks::PreCallValidateQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR *pPresentInfo) const {

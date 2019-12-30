@@ -674,36 +674,10 @@ struct CBVertexBufferBindingInfo {
     std::vector<BufferBinding> vertex_buffer_bindings;
 };
 
-struct ImageSubresourcePair {
-    VkImage image;
-    bool hasSubresource;
-    VkImageSubresource subresource;
-};
-
 static inline bool operator==(const VkImageSubresource &lhs, const VkImageSubresource &rhs) {
     bool is_equal = (lhs.aspectMask == rhs.aspectMask) && (lhs.mipLevel == rhs.mipLevel) && (lhs.arrayLayer == rhs.arrayLayer);
     return is_equal;
 }
-inline bool operator==(const ImageSubresourcePair &img1, const ImageSubresourcePair &img2) {
-    if (img1.image != img2.image || img1.hasSubresource != img2.hasSubresource) return false;
-    return !img1.hasSubresource || (img1.subresource == img2.subresource);
-}
-
-namespace std {
-template <>
-struct hash<ImageSubresourcePair> {
-    size_t operator()(ImageSubresourcePair img) const throw() {
-        size_t hashVal = hash<uint64_t>()(reinterpret_cast<uint64_t &>(img.image));
-        hashVal ^= hash<bool>()(img.hasSubresource);
-        if (img.hasSubresource) {
-            hashVal ^= hash<uint32_t>()(reinterpret_cast<uint32_t &>(img.subresource.aspectMask));
-            hashVal ^= hash<uint32_t>()(img.subresource.mipLevel);
-            hashVal ^= hash<uint32_t>()(img.subresource.arrayLayer);
-        }
-        return hashVal;
-    }
-};
-}  // namespace std
 
 // Canonical dictionary for PushConstantRanges
 using PushConstantRangesDict = hash_util::Dictionary<PushConstantRanges>;
@@ -1045,6 +1019,9 @@ struct QFOTransferCBScoreboards {
 typedef std::map<QueryObject, QueryState> QueryMap;
 typedef std::map<QueryObjectPass, QueryState> QueryPassMap;
 typedef std::unordered_map<VkEvent, VkPipelineStageFlags> EventToStageMap;
+typedef ImageSubresourceLayoutMap::LayoutMap GlobalImageLayoutRangeMap;
+typedef std::unordered_map<VkImage, std::unique_ptr<GlobalImageLayoutRangeMap>> GlobalImageLayoutMap;
+typedef std::unordered_map<VkImage, std::unique_ptr<ImageSubresourceLayoutMap>> CommandBufferImageLayoutMap;
 
 // Cmd Buffer Wrapper Struct - TODO : This desperately needs its own class
 struct CMD_BUFFER_STATE : public BASE_NODE {
@@ -1101,8 +1078,7 @@ struct CMD_BUFFER_STATE : public BASE_NODE {
     std::vector<VkEvent> events;
     std::unordered_set<QueryObject> activeQueries;
     std::unordered_set<QueryObject> startedQueries;
-    typedef std::unordered_map<VkImage, std::unique_ptr<ImageSubresourceLayoutMap>> ImageLayoutMap;
-    ImageLayoutMap image_layout_map;
+    CommandBufferImageLayoutMap image_layout_map;
     CBVertexBufferBindingInfo current_vertex_buffer_binding_info;
     bool vertex_buffer_used;  // Track for perf warning to make sure any bound vtx buffer used
     VkCommandBuffer primaryCommandBuffer;
@@ -1174,11 +1150,6 @@ struct CB_SUBMISSION {
     uint32_t perf_submit_pass;
 };
 
-struct IMAGE_LAYOUT_STATE {
-    VkImageLayout layout;
-    VkFormat format;
-};
-
 struct MT_FB_ATTACHMENT_INFO {
     IMAGE_VIEW_STATE *view_state;
     VkImage image;
@@ -1231,5 +1202,6 @@ enum BarrierOperationsType {
 
 ImageSubresourceLayoutMap *GetImageSubresourceLayoutMap(CMD_BUFFER_STATE *cb_state, const IMAGE_STATE &image_state);
 const ImageSubresourceLayoutMap *GetImageSubresourceLayoutMap(const CMD_BUFFER_STATE *cb_state, VkImage image);
+void AddInitialLayoutintoImageLayoutMap(const IMAGE_STATE &image_state, GlobalImageLayoutMap &image_layout_map);
 
 #endif  // CORE_VALIDATION_TYPES_H_
